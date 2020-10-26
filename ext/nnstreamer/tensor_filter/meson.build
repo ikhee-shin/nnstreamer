@@ -100,10 +100,10 @@ if tflite_support_is_available
     ],
   )
 
-  if not flatbuf_support_is_available
-    flatbuf_dep = dependency('flatbuffers', required : true, \
-        not_found_message : 'flatbuf devel package should be install to build the tensorflow lite subplugin.')
-  endif
+  #if not flatbuf_support_is_available
+  #  flatbuf_dep = dependency('flatbuffers', required : true, \
+  #      not_found_message : 'flatbuf devel package should be install to build the tensorflow lite subplugin.')
+  #endif
 
   filter_sub_tflite_sources = ['tensor_filter_tensorflow_lite.cc']
 
