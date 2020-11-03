@@ -24,6 +24,7 @@
 #define ACCL_CPU_SIMD_STR  "cpu.simd"
 #define ACCL_CPU_NEON_STR  "cpu.neon"
 #define ACCL_GPU_STR  "gpu"
+/** @todo Define ACCL_DSP_STR */
 #define ACCL_NPU_STR  "npu"
 #define ACCL_NPU_MOVIDIUS_STR  "npu.movidius"
 #define ACCL_NPU_EDGE_TPU_STR  "npu.edgetpu"
@@ -89,6 +90,7 @@ typedef enum
   ACCL_CPU_SIMD     = 0x1100,     /**< specify device as SIMD in cpu, if possible */
   ACCL_CPU_NEON     = 0x1100,     /**< specify device as NEON (alias for SIMD) in cpu, if possible */
   ACCL_GPU          = 0x2000,     /**< specify device as GPU, if possible */
+  /** @todo Define ACCL_DSP */
   ACCL_NPU          = 0x4000,     /**< specify device as any NPU, if possible */
   ACCL_NPU_MOVIDIUS = 0x4001,     /**< specify device as movidius, if possible */
   ACCL_NPU_EDGE_TPU = 0x4002,     /**< specify device as edge tpu, if possible */
@@ -142,10 +144,12 @@ typedef struct _GstTensorFilterProperties
   int input_configured; /**< TRUE if input tensor is configured. Use int instead of gboolean because this is refered by custom plugins. */
   GstTensorsInfo input_meta; /**< configured input tensor info */
   tensors_layout input_layout; /**< data layout info provided as a property to tensor_filter for the input, defaults to _NNS_LAYOUT_ANY for all the tensors */
+  unsigned int input_ranks[NNS_TENSOR_SIZE_LIMIT];  /**< the rank list of input tensors, it is calculated based on the dimension string. */
 
   int output_configured; /**< TRUE if output tensor is configured. Use int instead of gboolean because this is refered by custom plugins. */
   GstTensorsInfo output_meta; /**< configured output tensor info */
   tensors_layout output_layout; /**< data layout info provided as a property to tensor_filter for the output, defaults to _NNS_LAYOUT_ANY for all the tensors */
+  unsigned int output_ranks[NNS_TENSOR_SIZE_LIMIT];  /**< the rank list of output tensors, it is calculated based on the dimension string. */
 
   const char *custom_properties; /**< sub-plugin specific custom property values in string */
   union {

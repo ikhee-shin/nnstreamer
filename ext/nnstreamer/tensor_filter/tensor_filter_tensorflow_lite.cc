@@ -60,7 +60,6 @@ typedef struct
 {
   const gchar *model_file; /**< path to tensorflow-lite model file */
   const gchar *accelerators; /**< accelerators set for this subplugin */
-  gboolean use_nnapi; /**< flag to use NNAPI */
   gint num_threads; /**< the number of threads */
 } tflite_option_s;
 
@@ -98,8 +97,8 @@ public:
   TFLiteInterpreter ();
   ~TFLiteInterpreter ();
 
-  int invoke (const GstTensorMemory * input, GstTensorMemory * output, bool use_nnapi);
-  int loadModel (bool use_nnapi, int num_threads);
+  int invoke (const GstTensorMemory * input, GstTensorMemory * output);
+  int loadModel (int num_threads, accl_hw accelerator);
   void moveInternals (TFLiteInterpreter& interp);
 
   int setInputTensorProp ();
@@ -122,6 +121,9 @@ public:
   /** @brief cache input and output tensor ptr before invoke */
   int cacheInOutTensorPtr ();
 
+  /** @brief set delegate for the tflite interpreter */
+  void setDelegate (TfLiteDelegate* delegate) { delegate_ = delegate; }
+
 private:
   GMutex mutex;
   char *model_path;
@@ -139,6 +141,12 @@ private:
   int getTensorDim (int tensor_idx, tensor_dim dim);
   int setTensorProp (const std::vector<int> &tensor_idx_list,
       GstTensorsInfo * tensorMeta);
+
+  TfLiteDelegate* delegate_ = nullptr; /**< The delegate for tflite interpreter */
+
+#if defined(__ANDROID__) && (TFLITE_VERSION_MAJOR >= 2 || TFLITE_VERSION_MINOR >= 14)
+  std::unique_ptr<tflite::StatefulNnApiDelegate> stateful_nnapi_delegate; /**< The pointer of NNAPI delegate */
+#endif
 };
 
 /**
@@ -161,14 +169,13 @@ public:
   int cacheInOutTensorPtr ();
 
 private:
-  bool use_nnapi;
   int num_threads;
   accl_hw accelerator;
 
   TFLiteInterpreter interpreter;
   TFLiteInterpreter interpreter_sub;
 
-  void setAccelerator (const char * accelerators, bool nnapi);
+  void setAccelerator (const char * accelerators);
 };
 
 extern "C" { /* accessed by android api */
@@ -210,7 +217,7 @@ TFLiteInterpreter::~TFLiteInterpreter ()
  */
 int
 TFLiteInterpreter::invoke (const GstTensorMemory * input,
-    GstTensorMemory * output, bool use_nnapi)
+    GstTensorMemory * output)
 {
   int64_t start_time, stop_time;
   TfLiteTensor *tensor_ptr;
@@ -267,7 +274,7 @@ TFLiteInterpreter::invoke (const GstTensorMemory * input,
  * @return 0 if OK. non-zero if error.
  */
 int
-TFLiteInterpreter::loadModel (bool use_nnapi, int num_threads)
+TFLiteInterpreter::loadModel (int num_threads, accl_hw accelerator)
 {
 #if (DBG)
   gint64 start_time = g_get_monotonic_time ();
@@ -290,7 +297,6 @@ TFLiteInterpreter::loadModel (bool use_nnapi, int num_threads)
     return -2;
   }
 
-  interpreter->UseNNAPI (use_nnapi);
   if (num_threads > 0) {
     int n = static_cast<int> (std::thread::hardware_concurrency ());
 
@@ -299,10 +305,29 @@ TFLiteInterpreter::loadModel (bool use_nnapi, int num_threads)
     interpreter->SetNumThreads (n);
   }
 
-  if (interpreter->AllocateTensors () != kTfLiteOk) {
-    ml_loge ("Failed to allocate tensors\n");
-    return -2;
+  /** set nnapi delegate when accelerator set to auto (cpu.neon in Android), GPU or NPU */
+  if (accelerator == ACCL_CPU_NEON || accelerator == ACCL_GPU ||
+          accelerator == ACCL_NPU) {
+#if defined(__ANDROID__) && (TFLITE_VERSION_MAJOR >= 2 || TFLITE_VERSION_MINOR >= 14)
+    stateful_nnapi_delegate.reset (new tflite::StatefulNnApiDelegate ());
+    setDelegate (stateful_nnapi_delegate.get ());
+#else
+    ml_logw ("NNAPI delegate is available only in Android with tflite v1.14.0 or higher");
+#endif
   }
+
+  if (delegate_ != nullptr) {
+    if (interpreter->ModifyGraphWithDelegate (delegate_) != kTfLiteOk) {
+      ml_loge ("Failed to allocate tensors with NNAPI delegate\n");
+      return -2;
+    }
+  } else {
+    if (interpreter->AllocateTensors () != kTfLiteOk) {
+      ml_loge ("Failed to allocate tensors\n");
+      return -2;
+    }
+  }
+
 #if (DBG)
   gint64 stop_time = g_get_monotonic_time ();
   g_message ("Model is loaded: %" G_GINT64_FORMAT, (stop_time - start_time));
@@ -564,26 +589,12 @@ fail_exit:
  * @brief	Set the accelerator for the tf engine
  */
 void
-TFLiteCore::setAccelerator (const char * accelerators, bool nnapi)
+TFLiteCore::setAccelerator (const char * accelerators)
 {
-  use_nnapi = nnapi;
   accelerator = parse_accl_hw (accelerators, tflite_accl_support,
       tflite_accl_auto, tflite_accl_default);
-  if (accelerators == NULL || accelerator == ACCL_NONE) {
-    g_warning ("Try to get nnapi flag from the configuration.");
-    goto use_nnapi_ini;
-  }
 
   return;
-
-use_nnapi_ini:
-  use_nnapi = nnsconf_get_custom_value_bool ("tensorflowlite", "enable_nnapi",
-      FALSE);
-  if (use_nnapi == FALSE) {
-    accelerator = ACCL_NONE;
-  } else {
-    accelerator = get_accl_hw_type (tflite_accl_auto);
-  }
 }
 
 /**
@@ -601,8 +612,8 @@ TFLiteCore::init (tflite_option_s * option)
   interpreter.setModelPath (option->model_file);
   num_threads = option->num_threads;
 
-  setAccelerator (option->accelerators, option->use_nnapi);
-  g_message ("nnapi = %d, accl = %s", use_nnapi, get_accl_hw_str (accelerator));
+  setAccelerator (option->accelerators);
+  g_message ("accl = %s", get_accl_hw_str (accelerator));
 
   if (loadModel ()) {
     ml_loge ("Failed to load model\n");
@@ -650,7 +661,7 @@ TFLiteCore::loadModel ()
   int err;
 
   interpreter.lock ();
-  err = interpreter.loadModel (use_nnapi, num_threads);
+  err = interpreter.loadModel (num_threads, accelerator);
   interpreter.unlock ();
 
   return err;
@@ -764,7 +775,7 @@ TFLiteCore::reloadModel (const char * _model_path)
    * load a model into sub interpreter. This loading overhead is indenendent
    * with main one's activities.
    */
-  err = interpreter_sub.loadModel (use_nnapi, num_threads);
+  err = interpreter_sub.loadModel (num_threads, accelerator);
   if (err != 0) {
     ml_loge ("Failed to load model %s\n", _model_path);
     goto out_unlock;
@@ -824,7 +835,7 @@ TFLiteCore::invoke (const GstTensorMemory * input, GstTensorMemory * output)
   int err;
 
   interpreter.lock ();
-  err = interpreter.invoke (input, output, use_nnapi);
+  err = interpreter.invoke (input, output);
   interpreter.unlock ();
 
   return err;
@@ -857,7 +868,6 @@ tflite_parseCustomOption (const GstTensorFilterProperties * prop,
 
   option->model_file = prop->model_files[0];
   option->accelerators = prop->accl_str;
-  option->use_nnapi = FALSE;
   option->num_threads = -1;
 
   if (prop->custom_properties) {
@@ -874,10 +884,7 @@ tflite_parseCustomOption (const GstTensorFilterProperties * prop,
         g_strstrip (pair[0]);
         g_strstrip (pair[1]);
 
-        if (g_ascii_strcasecmp (pair[0], "UseNNAPI") == 0) {
-          if (g_ascii_strcasecmp (pair[1], "true") == 0)
-            option->use_nnapi = TRUE;
-        } else if (g_ascii_strcasecmp (pair[0], "NumThreads") == 0) {
+        if (g_ascii_strcasecmp (pair[0], "NumThreads") == 0) {
           option->num_threads = (int) g_ascii_strtoll (pair[1], NULL, 10);
         } else {
           g_warning ("Unknown option (%s).", strv[i]);
